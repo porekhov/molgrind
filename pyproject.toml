@@ -1,0 +1,29 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "molgrinder"
+version = "0.1.0"
+description = "Martini 3 coarse-grained topologies for small molecules"
+readme = "README.md"
+requires-python = ">=3.10"
+dependencies = [
+    "numpy",
+    "scipy",
+    "pandas",
+    "scikit-learn",
+    "torch",
+    "torch-geometric",
+    "rdkit",
+    "dimorphite_dl",
+]
+
+[project.scripts]
+molgrinder = "molgrinder.main:main"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.setuptools.package-data]
+molgrinder = ["model.pt", "martini_bead_classifiers.pkl"]
