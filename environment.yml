@@ -1,0 +1,18 @@
+# Molgrinder 0.1, matching the stack used to train and test the shipped checkpoint.
+# Create with: conda env create -f environment.yml
+name: molgrinder
+channels:
+  - conda-forge
+dependencies:
+  - python=3.13.2
+  - numpy=2.2.4
+  - scipy=1.16.0
+  - pandas=2.2.3
+  - scikit-learn=1.7.2
+  - rdkit=2024.09.6
+  - pip
+  - pip:
+      - torch==2.6.0
+      - torch-geometric==2.6.1
+      - dimorphite_dl==2.1.0
+      - molgrinder @ git+https://github.com/porekhov/molgrinder.git

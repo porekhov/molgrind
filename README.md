@@ -8,16 +8,24 @@ Coarse-grain a small molecule to Martini 3 from a SMILES string or a mol2 file.
 Install
 -------
 
-From this directory:
+The tested stack is in `environment.yml`. From this directory:
+
+    conda env create -f environment.yml
+    conda activate molgrinder
+
+That creates the `molgrinder` environment and installs this package from
+GitHub. Python 3.13.2, NumPy 2.2.4, SciPy 1.16.0, pandas 2.2.3,
+scikit-learn 1.7.2, and RDKit 2024.09.6 come from conda-forge. PyTorch
+2.6.0, PyTorch Geometric 2.6.1, and Dimorphite-DL 2.1.0 come from pip.
+PyTorch Geometric is not published on conda-forge. After `conda activate`,
+the command `molgrinder` is on PATH. No separate `pip install` is required.
+
+An editable install into an environment you already have is:
 
     pip install -e .
 
-The command `molgrinder` is then on PATH. The partition network (model.pt) and
-the bead-type classifiers (martini_bead_classifiers.pkl) are installed with
-the package.
-
-Tested with Python 3.13, torch 2.6, torch-geometric 2.6, rdkit 2024.09, and
-dimorphite_dl.
+The partition network (model.pt) and the bead-type classifiers
+(martini_bead_classifiers.pkl) are installed with the package.
 
 SMILES
 ------
@@ -52,6 +60,10 @@ The gro is centered, and the box is the bead extent plus 1 nm on each side.
 
 Train
 -----
+
+`train_dataset/` holds the 148 molecules used to train the partition network,
+one `.npz` file each. `martini3_all_beads.csv` is the bead table used to
+train the bead-type classifiers.
 
     molgrinder train --dataset_dir ./train_dataset --out model.pt
 
