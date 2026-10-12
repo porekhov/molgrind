@@ -3,7 +3,7 @@ requires = ["setuptools>=68"]
 build-backend = "setuptools.build_meta"
 
 [project]
-name = "molgrinder"
+name = "molgrind"
 version = "0.1.0"
 description = "Martini 3 coarse-grained topologies for small molecules"
 readme = "README.md"
@@ -20,10 +20,10 @@ dependencies = [
 ]
 
 [project.scripts]
-molgrinder = "molgrinder.main:main"
+molgrind = "molgrind.main:main"
 
 [tool.setuptools.packages.find]
 where = ["src"]
 
 [tool.setuptools.package-data]
-molgrinder = ["model.pt", "martini_bead_classifiers.pkl"]
+molgrind = ["model.pt", "martini_bead_classifiers.pkl"]
