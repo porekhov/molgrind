@@ -7,7 +7,18 @@ import numpy as np
 import pandas as pd
 
 from rdkit import Chem
-from rdkit.Chem import AllChem, Lipinski, rdMolDescriptors
+from rdkit.Chem import AllChem, rdMolDescriptors
+
+# Aromatic nitrogens are acceptors only when they have two neighbors.
+# The bridgehead nitrogen of indolizine has three and is not an acceptor.
+HBA_SMARTS = Chem.MolFromSmarts(
+    "[$([O,S;H1;v2;+0]-[!$(*=[O,N,P,S])]),"
+    "$([O,S;H0;v2;+0]),"
+    "$([O,S;-]),"
+    "$([N;v3;+0;!$(N-*=&!@[O,N,P,S])]),"
+    "$([n;H0;X2;+0]),"
+    "$([o,s;+0])]"
+)
 
 
 # ---- Column order required by models ----
@@ -28,33 +39,27 @@ ATOM_TYPES = ["C", "N", "O", "F", "P", "S", "Cl", "Br", "I"]
 HALOGEN_COLS = ["F", "Cl", "Br", "I"]
 
 
-def _as_atom_index_list(x: Any) -> List[int]:
-    """Flatten RDKit substructure matches to atom indices.
+def get_hbond_atoms(mol: Chem.Mol) -> Tuple[set, set]:
+    """Return sets of hydrogen-bond donor and acceptor atom indices.
 
-    Lipinski._HDonors and _HAcceptors return GetSubstructMatches: a tuple of
-    match tuples, one per donor or acceptor, e.g. ((0,), (3,), (11,)).
-    Every match is kept. Match order is preserved and repeated indices are dropped.
+    Donors are N, O, or S atoms with a non-negative formal charge and at least
+    one attached hydrogen. Acceptors follow HBA_SMARTS.
     """
-    if x is None:
-        return []
-    if isinstance(x, np.ndarray):
-        x = x.tolist()
-    if not isinstance(x, (list, tuple)):
-        return []
-
-    out: List[int] = []
-    seen = set()
-    for match in x:
-        atoms = match if isinstance(match, (list, tuple, np.ndarray)) else (match,)
-        for v in atoms:
-            try:
-                idx = int(v)
-            except (TypeError, ValueError):
-                continue
-            if idx not in seen:
-                seen.add(idx)
-                out.append(idx)
-    return out
+    donors = {
+        atom.GetIdx()
+        for atom in mol.GetAtoms()
+        if (
+            atom.GetAtomicNum() in (7, 8, 16)
+            and atom.GetFormalCharge() >= 0
+            and atom.GetTotalNumHs(includeNeighbors=True) > 0
+        )
+    }
+    acceptors = {
+        atom_idx
+        for match in mol.GetSubstructMatches(HBA_SMARTS)
+        for atom_idx in match
+    }
+    return donors, acceptors
 
 
 def get_descs(mol: Chem.Mol, beads: Sequence[Sequence[int]]) -> List[List[float]]:
@@ -90,8 +95,7 @@ def get_descs(mol: Chem.Mol, beads: Sequence[Sequence[int]]) -> List[List[float]
     acceptors_flag = np.zeros(n_atoms, dtype=float)
 
 
-    d_idx = _as_atom_index_list(Lipinski._HDonors(mol))
-    a_idx = _as_atom_index_list(Lipinski._HAcceptors(mol))
+    d_idx, a_idx = get_hbond_atoms(mol)
     
     for i in d_idx:
         if 0 <= i < n_atoms:
