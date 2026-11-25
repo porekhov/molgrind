@@ -11,6 +11,9 @@ Training set format, one .npz per molecule in dataset_dir:
 Prediction writes <out_pred>.itp, _CG.gro, _CG.pdb, _AA.pdb, .svg, and .npz.
 The residue name is the first four characters of --out_pred, uppercased.
 SMILES input is ionized with Dimorphite-DL before mapping.
+
+`molgrind topology` skips mapping and bead assignment. It reads a JSON
+object with smiles, cgnodes, and bead_types and writes the same topology files.
 """
 
 from __future__ import annotations
@@ -1322,6 +1325,11 @@ def train_main(args: argparse.Namespace) -> None:
 
     files = list_npz_files(args.dataset_dir)
     tr_files, va_files = split_files(files, val_frac=args.val_frac, seed=cfg.seed)
+    print(
+        f"Scaffold split (seed {cfg.seed}): {len(tr_files)} training and "
+        f"{len(va_files)} validation molecules from {len(files)} files. "
+        "The validation molecules select the checkpoint and are not a separate test set."
+    )
 
     tr_data = build_dataset(tr_files, cfg, seed=cfg.seed)
     va_data = build_dataset(va_files, cfg, seed=cfg.seed + 1)
@@ -1605,6 +1613,153 @@ def atom_feature_matrix(
     return X
 
 
+def _load_mapped_records(path: str) -> List[dict]:
+    """One mapped molecule, a JSON list, or one JSON object per line."""
+    text = Path(path).read_text()
+    try:
+        data = json.loads(text)
+    except json.JSONDecodeError:
+        data = [json.loads(line) for line in text.splitlines() if line.strip()]
+    if isinstance(data, dict):
+        return [data]
+    if isinstance(data, list) and all(isinstance(item, dict) for item in data):
+        return data
+    raise SystemExit(f"{path} must contain a mapped molecule or a list of them.")
+
+
+def _mapped_bead_map(record: dict, n_atoms: int) -> Tuple[List[List[int]], List[str]]:
+    """Heavy-atom bead lists and Martini types. Indices follow the SMILES atom order."""
+    try:
+        nodes = record["cgnodes"]
+        types = record["bead_types"]
+    except KeyError as exc:
+        raise SystemExit("Each molecule needs smiles, cgnodes, and bead_types.") from exc
+    if not isinstance(nodes, list) or not isinstance(types, list):
+        raise SystemExit("cgnodes and bead_types must be lists.")
+    if len(nodes) != len(types) or len(nodes) < 1:
+        raise SystemExit("cgnodes and bead_types must be non-empty and the same length.")
+    bead_map: List[List[int]] = []
+    bead_types: List[str] = []
+    seen = set()
+    for node, bead_type in zip(nodes, types):
+        if not isinstance(node, list) or len(node) < 1:
+            raise SystemExit("Every bead needs at least one heavy-atom index.")
+        atoms = []
+        for atom in node:
+            if isinstance(atom, bool) or not isinstance(atom, int):
+                raise SystemExit(f"Atom index {atom!r} is not an integer.")
+            if atom < 0 or atom >= n_atoms:
+                raise SystemExit(
+                    f"Atom index {atom} is outside this SMILES (0..{n_atoms - 1})."
+                )
+            if atom in seen:
+                raise SystemExit(f"Atom {atom} is mapped to more than one bead.")
+            seen.add(atom)
+            atoms.append(atom)
+        name = str(bead_type).strip()
+        if not name:
+            raise SystemExit("A bead type is empty.")
+        bead_map.append(atoms)
+        bead_types.append(name)
+    missing = [i for i in range(n_atoms) if i not in seen]
+    if missing:
+        raise SystemExit(f"These heavy atoms have no bead: {missing[:12]}")
+    return bead_map, bead_types
+
+
+def _ring_bead_groups(mol: Chem.Mol, bead_map: List[List[int]]) -> List[List[int]]:
+    """Bead indices of each ring system, including its single-atom substituents."""
+    groups = []
+    assigned = set()
+    for system in get_ring_systems(mol):
+        system_atoms = set(int(atom) for atom in system)
+        bead_ids = []
+        for bead_id, bead in enumerate(bead_map):
+            if bead_id in assigned:
+                continue
+            if system_atoms.intersection(bead):
+                bead_ids.append(bead_id)
+                assigned.add(bead_id)
+        if bead_ids:
+            groups.append(bead_ids)
+    return groups
+
+
+def _output_prefix(out_pred: str, record: dict, index: int, multiple: bool) -> str:
+    if not multiple:
+        return out_pred
+    raw = str(record.get("id") or f"mol_{index:03d}")
+    safe = "".join(ch if ch.isalnum() or ch in "-_" else "_" for ch in raw).strip("_")
+    if not safe:
+        safe = f"mol_{index:03d}"
+    return str(Path(out_pred) / safe)
+
+
+def write_mapped_topology(record: dict, out_pred: str, nconfs: int) -> None:
+    """Build a GROMACS topology from a supplied mapping and bead types."""
+    smiles = record.get("smiles")
+    if not isinstance(smiles, str) or not smiles.strip():
+        raise SystemExit("The mapped molecule needs a smiles string.")
+    heavy = mol_from_smiles_or_exit(smiles.strip())
+    heavy = Chem.RemoveHs(heavy)
+    bead_map, bead_types = _mapped_bead_map(record, heavy.GetNumAtoms())
+    mol_h = _with_appended_hydrogens(heavy)
+    beads = build_beads_including_hydrogens(mol_h, bead_map)
+    charges = bead_class.get_formal_charges(mol_h, beads)
+    adjacency = rdmolops.GetAdjacencyMatrix(heavy)
+    A_cg = cg_adjacency_from_beads(adjacency, bead_map)
+    ring_beads = _ring_bead_groups(heavy, bead_map)
+    embed_conformers(mol_h, nconfs)
+    coords0 = topology.get_coords(mol_h, beads)
+    mol_name = Path(out_pred).name[:4].upper() or "MOL"
+    bead_names = topology.write_itp(
+        mol_h,
+        mol_name,
+        beads,
+        bead_types,
+        ring_beads,
+        coords0,
+        charges,
+        A_cg,
+        f"{out_pred}.itp",
+    )
+    topology.write_gro(
+        mol_h,
+        mol_name,
+        bead_names,
+        coords0,
+        A_cg,
+        f"{out_pred}",
+        f"{out_pred}",
+    )
+    svg = draw.draw_2d(
+        mol_h,
+        bead_map,
+        bead_types,
+        size=(500, 500),
+        label_font_size_px=12,
+        label_bg_opacity=0.5,
+        label_margin_px=8,
+    )
+    with open(f"{out_pred}.svg", "w", encoding="utf-8") as handle:
+        handle.write(svg)
+
+
+def topology_main(args: argparse.Namespace) -> None:
+    records = _load_mapped_records(args.mapped)
+    if not records:
+        raise SystemExit(f"{args.mapped} contains no molecules.")
+    multiple = len(records) > 1
+    if multiple:
+        Path(args.out_pred).mkdir(parents=True, exist_ok=True)
+    for index, record in enumerate(records, start=1):
+        prefix = _output_prefix(args.out_pred, record, index, multiple)
+        if multiple:
+            Path(prefix).parent.mkdir(parents=True, exist_ok=True)
+        write_mapped_topology(record, prefix, args.nconfs)
+        print(f"wrote {prefix}.itp")
+
+
 def predict_main(args: argparse.Namespace) -> None:
     
     device = torch.device("cuda" if torch.cuda.is_available() and not args.cpu else "cpu")
@@ -1747,6 +1902,22 @@ def build_parser() -> argparse.ArgumentParser:
     p_pr.add_argument("--nconfs", type=int, default=10, help="Number of conformations to generate topology")
     p_pr.add_argument("--cpu", action="store_true")
 
+    p_top = sub.add_parser(
+        "topology",
+        help="Write a GROMACS topology from a mapped JSON molecule",
+    )
+    p_top.add_argument(
+        "--mapped",
+        required=True,
+        help="JSON molecule with smiles, cgnodes, and bead_types. A list or one object per line is also accepted.",
+    )
+    p_top.add_argument(
+        "--out_pred",
+        required=True,
+        help="Output prefix. For more than one molecule, this is the output directory.",
+    )
+    p_top.add_argument("--nconfs", type=int, default=10, help="Number of conformations used for the bonded geometry")
+
     return p
 
 
@@ -1756,6 +1927,8 @@ def main() -> None:
         train_main(args)
     elif args.cmd == "predict":
         predict_main(args)
+    elif args.cmd == "topology":
+        topology_main(args)
     else:
         raise ValueError(f"Unknown cmd: {args.cmd}")
 
